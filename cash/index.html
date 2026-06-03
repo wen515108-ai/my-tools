@@ -151,7 +151,7 @@ select option{font-size:16px}
 .cb:active{opacity:.6}
 .cb.op{background:#ff9f0a}.cb.fn{background:#3a3a3c}.cb.zero{grid-column:span 2;border-radius:34px;text-align:left;padding-left:28px}.cb.eq{background:#30d158}
 .calc-ok{width:100%;margin-top:12px;padding:16px;background:var(--accent);color:#fff;border:none;border-radius:14px;font-family:inherit;font-size:17px;font-weight:700;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-.drag-item{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);touch-action:none}
+.drag-item{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)}
 .drag-item:last-child{border-bottom:none}
 .drag-handle{color:var(--text2);font-size:16px;cursor:grab;padding:0 4px;user-select:none;-webkit-user-select:none;touch-action:none;flex-shrink:0}
 .drag-handle:active{cursor:grabbing}
@@ -266,7 +266,7 @@ select option{font-size:16px}
       </div>
     </div>
     <label>日期</label><input type="date" id="exp-date">
-    <label>帳戶</label><select id="exp-account" onchange="updateExpCategories()"></select>
+    <label>帳戶</label><select id="exp-account" onchange="onExpAccountChange()"></select>
     <label>金額</label>
     <div class="amount-wrap"><span class="amount-prefix">$</span>
       <input type="number" id="exp-amount" placeholder="0" readonly style="padding-left:28px;cursor:pointer" onclick="openCalc('exp-amount')">
@@ -444,7 +444,7 @@ select option{font-size:16px}
       <button id="exp-cat-tab-home" class="btn-sm" onclick="switchExpCatTab('home')" style="background:var(--accent);color:#fff;border-color:var(--accent)">家用</button>
       <button id="exp-cat-tab-personal" class="btn-sm" onclick="switchExpCatTab('personal')">個人</button>
     </div>
-    <div id="exp-cat-list"></div>
+    <div id="exp-cat-list" style="max-height:240px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:0 8px"></div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <input type="text" id="new-exp-cat" placeholder="新分類名稱" style="flex:1">
       <button class="btn-secondary" onclick="addExpCategory()">新增</button>
@@ -850,15 +850,35 @@ function removeAccount(id){ if(!confirm('確定刪除此帳戶？')) return; acc
 
 // ── DEBT ──
 function renderDebtPanel(){
-  const debts={};
-  records.filter(r=>r.kind==='transfer'&&r.xfrType==='借出').forEach(r=>{ const k=r.acct+'->'+r.acctTo; debts[k]=(debts[k]||0)+Number(r.amount); });
-  records.filter(r=>r.kind==='transfer'&&r.xfrType==='還款').forEach(r=>{ const k=r.acctTo+'->'+r.acct; debts[k]=(debts[k]||0)-Number(r.amount); });
-  const rows=Object.entries(debts).filter(([,v])=>Math.abs(v)>0);
+  // 累計每個方向的借出金額
+  const lent={};
+  records.filter(r=>r.kind==='transfer'&&r.xfrType==='借出').forEach(r=>{
+    const k=r.acct+'->'+r.acctTo; lent[k]=(lent[k]||0)+Number(r.amount);
+  });
+  // 還款：從對應的借出方向扣除
+  records.filter(r=>r.kind==='transfer'&&r.xfrType==='還款').forEach(r=>{
+    const k=r.acctTo+'->'+r.acct; lent[k]=(lent[k]||0)-Number(r.amount);
+  });
+  // Net：A->B 與 B->A 互相抵消，只保留淨額為正的那一方
+  const seen=new Set();
+  const netRows=[];
+  Object.entries(lent).forEach(([key,amt])=>{
+    if(seen.has(key)) return;
+    const [fId,tId]=key.split('->');
+    const revKey=tId+'->'+fId;
+    seen.add(key); seen.add(revKey);
+    const revAmt=lent[revKey]||0;
+    const net=amt-revAmt;
+    if(net>0.01) netRows.push([key,net]);
+    else if(net<-0.01) netRows.push([revKey,-net]);
+    // net ≈ 0 → 不顯示
+  });
   const panel=document.getElementById('debt-panel');
-  if(!rows.length){ panel.innerHTML='<div style="font-size:13px;color:var(--text2);text-align:center;padding:16px">目前無未還借貸 ✓</div>'; return; }
-  panel.innerHTML=rows.map(([key,amt])=>{
-    const [fId,tId]=key.split('->'); const fA=accounts.find(a=>a.id===fId), tA=accounts.find(a=>a.id===tId); if(!fA||!tA) return '';
-    return `<div class="debt-row"><div><span class="tag tag-${fA.color}">${fA.emoji} ${fA.name}</span><span style="font-size:12px;color:var(--text2)">借給</span><span class="tag tag-${tA.color}">${tA.emoji} ${tA.name}</span></div><div class="debt-amount">$${Math.abs(amt).toLocaleString()}</div></div>`;
+  if(!netRows.length){ panel.innerHTML='<div style="font-size:13px;color:var(--text2);text-align:center;padding:16px">目前無未還借貸 ✓</div>'; return; }
+  panel.innerHTML=netRows.map(([key,amt])=>{
+    const [fId,tId]=key.split('->');
+    const fA=accounts.find(a=>a.id===fId), tA=accounts.find(a=>a.id===tId); if(!fA||!tA) return '';
+    return `<div class="debt-row"><div><span class="tag tag-${fA.color}">${fA.emoji} ${fA.name}</span><span style="font-size:12px;color:var(--text2)">借給</span><span class="tag tag-${tA.color}">${tA.emoji} ${tA.name}</span></div><div class="debt-amount">$${amt.toLocaleString()}</div></div>`;
   }).join('');
 }
 
@@ -926,13 +946,33 @@ function switchEntryType(type){
   if(sub){ sub.textContent={expense:'＋ 新增支出',income:'＋ 新增收入',proxy:'＋ 新增代收付'}[type]; sub.style.background=colors[type]; }
 }
 function updateExpBigCats(){ const el=document.getElementById('exp-bigcat'); if(!el) return; el.innerHTML=BIG_CATS.map(c=>`<option>${c}</option>`).join(''); }
+function onExpAccountChange(){
+  updateExpCategories();
+}
 function updateExpSubCats(){
   const acctId=document.getElementById('exp-account')?document.getElementById('exp-account').value:'';
   const acct=accounts.find(a=>a.id===acctId);
+  // 判斷帳戶類型（靠名稱比對，color 欄位可能建立時存錯）
+  const acctName=acct?acct.name:'';
+  const isHome=acctName.includes('家用');
+  const isPersonal=acctName.includes('個人');
   let cats;
-  if(!acct) cats=HOME_CATS;
-  else { const isHome=acct.id==='home'||acct.name==='家用'||acct.color==='home'; const isPersonal=acct.id==='personal'||acct.name==='個人'||acct.color==='personal'; if(isHome) cats=HOME_CATS; else if(isPersonal) cats=PERSONAL_CATS; else cats=[...HOME_CATS,...PERSONAL_CATS]; }
-  const el=document.getElementById('exp-category'); if(el) el.innerHTML=cats.map(c=>`<option>${c}</option>`).join('');
+  if(isHome) cats=HOME_CATS;
+  else if(isPersonal) cats=PERSONAL_CATS;
+  else cats=[...HOME_CATS,...PERSONAL_CATS];
+  // 切換費用大分類
+  const bc=document.getElementById('exp-bigcat');
+  if(bc){
+    if(isHome){ for(let o of bc.options){ if(o.text==='家用'){bc.value=o.value;break;} } }
+    else if(isPersonal){ for(let o of bc.options){ if(o.text==='個人'){bc.value=o.value;break;} } }
+  }
+  // 小分類：size=6 可見清單
+  const el=document.getElementById('exp-category');
+  if(el){
+    el.innerHTML=cats.map(c=>`<option>${c}</option>`).join('');
+    el.size=Math.min(cats.length,6);
+    el.selectedIndex=0;
+  }
 }
 function updateExpCategories(){ if(entryType==='income'){ const el=document.getElementById('exp-category'); if(el) el.innerHTML=incomeCategories.map(c=>`<option>${c}</option>`).join(''); } else { updateExpSubCats(); } }
 function updateIncCategories(){ const el=document.getElementById('inc-category'); if(el) el.innerHTML=incomeCategories.map(c=>`<option>${c}</option>`).join(''); if(entryType==='income'){const el2=document.getElementById('exp-category');if(el2) el2.innerHTML=incomeCategories.map(c=>`<option>${c}</option>`).join('');} }
@@ -1005,6 +1045,7 @@ function switchExpCatTab(tab){ expCatTab=tab; document.getElementById('exp-cat-t
 function renderExpCatList(){
   const cats=expCatTab==='home'?HOME_CATS:PERSONAL_CATS;
   const el=document.getElementById('exp-cat-list');
+  el.style.maxHeight='220px'; el.style.overflowY='auto';
   el.innerHTML=cats.map((c,i)=>`<div class="drag-item" data-idx="${i}" draggable="true"><span class="drag-handle">☰</span><span style="flex:1;font-size:13px">${c}</span><button class="btn-danger" onclick="event.stopPropagation();removeExpCat(${i})">✕</button></div>`).join('');
   initDragSort(el, function(newOrder){ const cats=expCatTab==='home'?HOME_CATS:PERSONAL_CATS; const reordered=newOrder.map(i=>cats[i]); if(expCatTab==='home') HOME_CATS.splice(0,HOME_CATS.length,...reordered); else PERSONAL_CATS.splice(0,PERSONAL_CATS.length,...reordered); save();updateExpCategories();renderExpCatList(); });
 }
@@ -1147,7 +1188,7 @@ function saveEditRecord(){
 function calcPeriod(dateStr){ const d=new Date(dateStr+'T00:00:00'),y=d.getFullYear(),m=d.getMonth()+1; return `${y-1911}/${String(m).padStart(2,'0')}`; }
 function setExportRange(mode){ const now=new Date(),y=now.getFullYear(),m=now.getMonth(); let from,to; if(mode==='month'){from=new Date(y,m,1);to=new Date(y,m+1,0);}else if(mode==='last'){from=new Date(y,m-1,1);to=new Date(y,m,0);}else if(mode==='3m'){from=new Date(y,m-2,1);to=new Date(y,m+1,0);}else{from=new Date('2020-01-01');to=new Date('2099-12-31');} document.getElementById('export-date-from').value=from.toISOString().split('T')[0]; document.getElementById('export-date-to').value=to.toISOString().split('T')[0]; renderExport(); }
 function getExportRecs(){ const acctF=document.getElementById('exp-filter-account').value; const fromS=document.getElementById('export-date-from').value||'2000-01-01'; const toS=document.getElementById('export-date-to').value||'2099-12-31'; return records.filter(r=>{if(acctF&&r.acct!==acctF&&r.acctTo!==acctF)return false;return String(r.date)>=fromS&&String(r.date)<=toS;}).sort((a,b)=>String(a.date).localeCompare(String(b.date))||a.id-b.id); }
-function buildCSV(){ const header='消費日期,入帳日期,卡別,金額,消費明細,外幣幣別與金額,類別,備忘錄,期別,收支,費用大分類,費用小分類'; const rows=getExportRecs().map(r=>{ const d=String(r.date).replace(/-/g,'/');let amt=0,cat=r.category||'',shuZhi='',bigCat='';if(r.kind==='expense'){amt=r.type==='代收付'?r.amount:(r.type==='收入'?Math.abs(r.amount):r.amount);shuZhi=r.type==='收入'?'收入':r.type==='代收付'?'代收付':'支出';bigCat=r.bigCat||r.type||'';}else if(r.kind==='income'){amt=r.amount;shuZhi='收入';bigCat='收入';}else if(r.kind==='transfer'){const tA=accounts.find(a=>a.id===r.acctTo);amt=-Number(r.amount);cat=`轉帳至${tA?tA.name:'?'}`;shuZhi='支出';bigCat='轉帳';}else if(r.kind==='adjust'){amt=r.amount;cat='其他';shuZhi=Number(r.amount)>0?'收入':'支出';bigCat=Number(r.amount)>0?'收入':'其他';}return `${d},,現金,${amt},,,${cat},${r.note||''},${r.period||''},${shuZhi},${bigCat},${cat}`;}); return header+'\n'+rows.join('\n'); }
+function buildCSV(){ const header='消費日期,入帳日期,卡別,金額,消費明細,外幣幣別與金額,類別,備忘錄,期別,收支,費用大分類,費用小分類'; const rows=getExportRecs().map(r=>{ const d=String(r.date).replace(/-/g,'/');let amt=0,cat=r.category||'',shuZhi='',bigCat='';if(r.kind==='expense'){amt=r.type==='代收付'?r.amount:(r.type==='收入'?Math.abs(r.amount):r.amount);shuZhi=r.type==='收入'?'收入':r.type==='代收付'?'代收付':'支出';bigCat=r.bigCat||r.type||'';}else if(r.kind==='income'){amt=r.amount;shuZhi='收入';bigCat='收入';}else if(r.kind==='transfer'){const tA=accounts.find(a=>a.id===r.acctTo);amt=-Number(r.amount);cat=`轉帳至${tA?tA.name:'?'}`;shuZhi='支出';bigCat='轉帳';}else if(r.kind==='adjust'){amt=r.amount;cat='其他';shuZhi=Number(r.amount)>0?'收入':'支出';bigCat=Number(r.amount)>0?'收入':'其他';}const acctName=accounts.find(a=>a.id===r.acct)?.name||'現金'; return `${d},,${acctName},${amt},,,${cat},${r.note||''},${r.period||''},${shuZhi},${bigCat},${cat}`;}); return header+'\n'+rows.join('\n'); }
 ['export-date-from','export-date-to','exp-filter-account'].forEach(id=>{ setTimeout(()=>{ const el=document.getElementById(id); if(el) el.addEventListener('change',renderExport); },100); });
 function renderExport(){ const prev=document.getElementById('csv-preview'); const recs=getExportRecs(); prev.textContent=recs.length?buildCSV():'（尚無資料）'; }
 function downloadCSV(){ const recs=getExportRecs();if(!recs.length){showToast('沒有資料');return;} const csv='\uFEFF'+buildCSV(); const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}); const url=URL.createObjectURL(blob),a=document.createElement('a'); a.href=url;a.download=`現金記帳_${new Date().toISOString().split('T')[0].replace(/-/g,'')}.csv`;a.click();URL.revokeObjectURL(url);showToast('✓ 下載完成'); }
@@ -1172,7 +1213,7 @@ function downloadXLSX(){
       }else if(r.kind==='income'){amt=Number(r.amount);shuZhi='收入';bigCat='收入';}
       else if(r.kind==='transfer'){const tA=accounts.find(a=>a.id===r.acctTo);amt=-Math.abs(Number(r.amount));cat='轉帳至'+(tA?tA.name:'?');shuZhi='支出';bigCat='轉帳';}
       else if(r.kind==='adjust'){amt=Number(r.amount);cat='其他';shuZhi=Number(r.amount)>0?'收入':'支出';bigCat=Number(r.amount)>0?'收入':'其他';}
-      return [d,'','現金',amt,'','',cat,r.note||'',r.period||'',shuZhi,bigCat,cat];
+      const acctNameX=accounts.find(a=>a.id===r.acct)?.name||'現金'; return [d,'',acctNameX,amt,'','',cat,r.note||'',r.period||'',shuZhi,bigCat,cat];
     });
     const ws=XLSX.utils.aoa_to_sheet([headers,...rows]);
     ws['!cols']=[{wch:12},{wch:10},{wch:6},{wch:10},{wch:16},{wch:12},{wch:14},{wch:18},{wch:8},{wch:6},{wch:12},{wch:14}];
